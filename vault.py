@@ -61,6 +61,8 @@ class LookupModule(LookupBase):
                         (variables or inject).get('vault_cahostverify') or 'yes') != DISABLE_VAULT_CAHOSTVERIFY
         skipverify = ((os.getenv('VAULT_SKIP_VERIFY') in ['1', 'true', 'True', 't']) or
                       (variables or inject).get('vault_skip_verify'))
+        okifmissing = ((os.getenv('VAULT_OK_IF_MISSING') in ['1', 'true', 'True', 't']) or
+                      (variables or inject).get('vault_ok_if_missing'))
         self._verify_python_version(key, cafile, capath, cahostverify)
 
         try:
@@ -102,7 +104,7 @@ class LookupModule(LookupBase):
         # and if caching is activated, the token will be stored in the cache
         if not vault_token and approle_role_id and approle_secret_id:
             vault_token = self._fetch_approle_token(
-                cafile, capath, approle_role_id, approle_secret_id, approle_role_path, url, cahostverify, skipverify)
+                cafile, capath, approle_role_id, approle_secret_id, approle_role_path, url, cahostverify, skipverify, okifmissing)
             if vault_token and USE_CACHE:
                 VAULT_CACHE['ANSIBLE_HASHICORP_VAULT_APPROLE_TOKEN'] = vault_token
 
@@ -131,7 +133,7 @@ class LookupModule(LookupBase):
             if not vault_token:
                 token_result = self._fetch_github_token(cafile, capath, github_token, url, cahostverify, skipverify)
                 vault_token = token_result['auth']['client_token']
-            result = self._fetch_secret(cafile, capath, data, key, vault_token, url, cahostverify, skipverify)
+            result = self._fetch_secret(cafile, capath, data, key, vault_token, url, cahostverify, skipverify, okifmissing)
             if USE_CACHE:
                 VAULT_CACHE[key] = result
 
@@ -143,13 +145,13 @@ class LookupModule(LookupBase):
         return [result]
 
     def _fetch_approle_token(self, cafile, capath, role_id, secret_id,
-                             approle_role_path, url, cahostverify, skipverify):
+                             approle_role_path, url, cahostverify, skipverify, okifmissing):
         request_url = urljoin(url, approle_role_path)
         req_params = {
             'role_id': role_id,
             'secret_id': secret_id
         }
-        result = self._fetch_client_token(cafile, capath, request_url, req_params, cahostverify, skipverify)
+        result = self._fetch_client_token(cafile, capath, request_url, req_params, cahostverify, skipverify, okifmissing)
         token = result['auth']['client_token']
         return token
 
@@ -160,7 +162,7 @@ class LookupModule(LookupBase):
         result = self._fetch_client_token(cafile, capath, request_url, req_params, cahostverify, skipverify)
         return result
 
-    def _fetch_client_token(self, cafile, capath, url, data, cahostverify, skipverify):
+    def _fetch_client_token(self, cafile, capath, url, data, cahostverify, skipverify, okifmissing):
         try:
             context = None
             if cafile or capath:
@@ -171,12 +173,16 @@ class LookupModule(LookupBase):
             req = urllib2.Request(url, json.dumps(data))
             req.add_header('Content-Type', 'application/json')
             response = urllib2.urlopen(req, context=context) if context else urllib2.urlopen(req)
+        except urllib2.HTTPError as e:
+            if okifmissing:
+                return None
+            raise AnsibleError('Unable to retrieve personal token from vault: %s' % (e))
         except Exception as ex:
             raise AnsibleError('Unable to retrieve personal token from vault: %s' % (ex))
         result = json.loads(response.read())
         return result
 
-    def _fetch_secret(self, cafile, capath, data, key, vault_token, url, cahostverify, skipverify):
+    def _fetch_secret(self, cafile, capath, data, key, vault_token, url, cahostverify, skipverify, okifmissing):
         try:
             context = None
             if cafile or capath:
@@ -189,6 +195,10 @@ class LookupModule(LookupBase):
             req.add_header('X-Vault-Token', vault_token)
             req.add_header('Content-Type', 'application/json')
             response = urllib2.urlopen(req, context=context) if context else urllib2.urlopen(req)
+        except urllib2.HTTPError as e:
+            if okifmissing:
+                return None
+            raise AnsibleError('Unable to read %s from vault: %s' % (key, e))
         except Exception as ex:
             raise AnsibleError('Unable to read %s from vault: %s' % (key, ex))
         body = response.read()
